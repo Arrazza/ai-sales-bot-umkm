@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# Environment variables
+.env
+
+# Docs & notes pribadi
+*.txt
+*.docx
+
+# Data local (kalau tidak mau dipush)
+data/
