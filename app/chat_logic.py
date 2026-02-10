@@ -1,5 +1,15 @@
 import random
-from typing import Optional
+import re
+from typing import Optional, List
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+# Ambil data dari .env
+WA_ADMIN_NUMBER = os.getenv("WA_ADMIN_NUMBER", "6282135965079")
+ADMIN_NEGO_MSG = os.getenv("ADMIN_NEGO_MESSAGE", "Halo Admin, mau nego harga ini")
+
+# fungsi filter_by_criteria digunakan di beberapa flow (import awal)
 from app.inventory import filter_by_criteria
 
 # ===== MEMORY SESSION =====
@@ -28,8 +38,6 @@ BUY_INTENT_KEYWORDS = [
     "link checkout",
     "stoknya ada",
     "masih ada",
-    "ready",
-    "ready stock",
     "fix",
     "fix ambil",
     "gas",
@@ -76,6 +84,19 @@ GREETING_KEYWORDS = [
     "siang",
     "sore",
     "malam",
+]
+
+READY_KEYWORDS = [
+    "ready",
+    "stok ada",
+    "stoknya",
+    "masih ada",
+    "ada gak",
+    "ada ga",
+    "ready tidak",
+    "ready ga",
+    "ready gak",
+    "ready min?",
 ]
 
 POST_CHECKOUT_KEYWORDS = [
@@ -137,6 +158,32 @@ FALLBACK_RESPONSES = [
     "Hehe 😄 Kayaknya aku salah paham.\nKita lanjut dikit ya Kak.",
 ]
 
+DETAIL_KEYWORDS = [
+    "detail",
+    "detail lengkap",
+    "lihat detail",
+    "info lengkap",
+    "info detail",
+    "tolong detail",
+    "spek",
+    "spesifikasi",
+    "kondisi",
+    "kondisi barang",
+]
+
+NEGO_KEYWORDS = [
+    "nego",
+    "boleh kurang",
+    "diskon",
+    "kurangin",
+    "pasnya berapa",
+    "bisa kurang",
+    "harga net",
+    "kurangi",
+    "potongan",
+    "minta diskon",
+]
+
 
 # ===== UTIL FUNCTIONS =====
 def parse_budget(text: str) -> Optional[int]:
@@ -145,36 +192,46 @@ def parse_budget(text: str) -> Optional[int]:
     if not digits:
         return None
     value = int(digits)
-    if "k" in text or "rb" in text or "ribu" in text:
+    if any(k in text for k in ["k", "rb", "ribu"]):
         value *= 1000
     return value
 
 
 def parse_size(text: str) -> Optional[str]:
-    text = text.upper()
-    for size in ["S", "M", "L", "XL"]:
-        if size in text.split():
-            return size
-    return None
+    if not text:
+        return None
+    m = re.search(r"\b(XL|L|M|S)\b", text.upper())
+    return m.group(1) if m else None
 
 
 def parse_gender(text: str) -> Optional[str]:
-    text = text.lower()
-    if "cowok" in text or "pria" in text or "laki" in text:
+    text = (text or "").lower()
+    if any(k in text for k in ["cowok", "pria", "laki"]):
         return "cowok"
-    if "cewek" in text or "wanita" in text or "perempuan" in text:
+    if any(k in text for k in ["cewek", "wanita", "perempuan"]):
         return "cewek"
+    return None
+
+
+def extract_product_keyword(text: str, aliases: List[str]) -> Optional[str]:
+    if not text:
+        return None
+    text = text.lower()
+    for alias in aliases:
+        alias = alias.strip().lower()
+        if not alias:
+            continue
+        if f" {alias} " in f" {text} ":
+            return alias
     return None
 
 
 # ===== MAIN HANDLER =====
 def handle_chat(message: str, session_id: Optional[str]):
+    from app.inventory import fetch_inventory, get_all_aliases, get_products_by_alias
+
     if not session_id:
         session_id = "default"
-
-    message_lower = message.lower().strip()
-
-    # Buat session baru kalau belum ada
     if session_id not in session_store:
         session_store[session_id] = {
             "state": "ask_gender",
@@ -185,156 +242,160 @@ def handle_chat(message: str, session_id: Optional[str]):
         }
 
     session = session_store[session_id]
+    message_lower = (message or "").lower().strip()
 
-    # ===== RESET COMMAND =====
+    # DEFINISIKAN 'state' DI AWAL agar tidak UnboundLocalError
+    state = session.get("state")
+
+    # 1. RESET & GREETING
     if any(k in message_lower for k in RESET_KEYWORDS):
-        session_store.pop(session_id, None)
+        session_store[session_id] = {
+            "state": "ask_gender",
+            "gender": None,
+            "budget": None,
+            "size": None,
+        }
         return random.choice(ASK_GENDER_RESPONSES)
 
-    # ===== GREETING HANDLER =====
     if any(k == message_lower for k in GREETING_KEYWORDS):
-        session["state"] = "ask_gender"
         return random.choice(ASK_GENDER_RESPONSES)
 
-    # ===== MULTI-INTENT PRIORITY HANDLER =====
+    # 2. LOGIKA NEGO (WA ADMIN) - Disatukan & Diperbaiki
+    if any(k in message_lower for k in NEGO_KEYWORDS):
+        session["state"] = "waiting_admin"
+
+        # Ambil variabel global dengan benar
+        global WA_ADMIN_NUMBER, ADMIN_NEGO_MSG
+
+        encoded_msg = ADMIN_NEGO_MSG.replace(" ", "%20")
+        link_wa = f"https://wa.me/{WA_ADMIN_NUMBER}?text={encoded_msg}"
+
+        return (
+            "Boleh banget nego Kak! 😍\n\n"
+            "Tapi agar lebih enak bicaranya, langsung chat **Admin Pusat** kami ya. "
+            "Beliau yang punya wewenang kasih harga spesial buat Kakak:\n\n"
+            f"{link_wa}\n\n"
+            "Klik link di atas untuk lanjut nego ya Kak! 🙏"
+        )
+
+    # ISI READY QUESTIONS
+
+    # DETAIL HANDLER
+    if any(k in message_lower for k in DETAIL_KEYWORDS):
+        products = session.get("last_products")
+        if products is not None and not products.empty:
+            # --- PERBAIKAN: Cari produk spesifik yang disebut user ---
+            selected_product = None
+            for _, row in products.iterrows():
+                # Cek apakah nama produk ada di dalam pesan user
+                if row["nama_produk"].lower() in message_lower:
+                    selected_product = row
+                    break
+
+            # Jika user tidak menyebut nama brand, ambil yang pertama (default)
+            if selected_product is None:
+                selected_product = products.iloc[0]
+
+            p = selected_product
+            session["state"] = "detail_shown"
+
+            return (
+                f"Siap Kak 😊 Ini detail lengkap hoodie **{p['nama_produk']}**:\n\n"
+                f"• Kondisi: {p.get('deskripsi', '-')}\n"
+                f"• Warna: {p.get('warna', '-')}\n"
+                f"• Size: {p.get('ukuran', '-')}\n"
+                f"• Stok: {int(p.get('stok', 0))} pcs\n"
+                f"• Harga: Rp{int(p.get('harga', 0)):,}\n\n"
+                "Kalau mau lanjut checkout atau mau nego, bilang aja ya Kak 😊"
+            )
+
+    # CHECKOUT HANDLER
+    if session.get("state") in ["ready_shown", "detail_shown", "recommend"] and any(
+        k in message_lower for k in BUY_INTENT_KEYWORDS
+    ):
+        products = session.get("last_products")
+        if products is not None and not products.empty:
+            p = products.iloc[0]
+            session["state"] = "post_checkout"
+            return (
+                "Siap Kak 😍\nIni link checkout-nya ya:\n"
+                f"{p.get('link_checkout','-')}\n\n"
+                # "Kalau mau aku bantuin sampai beres juga bisa 😊"
+            )
+
+    # Logika ekstraksi informasi
     gender_guess = parse_gender(message_lower)
     budget_guess = parse_budget(message_lower)
     size_guess = parse_size(message)
 
-    if gender_guess and session["gender"] is None:
+    if gender_guess:
         session["gender"] = gender_guess
-
-    if budget_guess and session["budget"] is None:
+    if budget_guess:
         session["budget"] = budget_guess
-
-    if size_guess and session["size"] is None:
+    if size_guess:
         session["size"] = size_guess
 
-    if any([gender_guess, budget_guess, size_guess]):
+    # --- LOGIKA TRANSISI: MENANGKAP PILIHAN PRODUK SETELAH REKOMENDASI ---
+    df_inv = fetch_inventory()
+    aliases = get_all_aliases(df_inv)
+    product_keyword = next((a for a in aliases if a and a in message_lower), None)
 
-        if session["gender"] is None:
-            session["state"] = "ask_gender"
-            return random.choice(ASK_GENDER_RESPONSES)
+    if product_keyword:
+        products = get_products_by_alias(df_inv, product_keyword)
+        if products.empty:
+            return f"Maaf Kak 😢 Hoodie **{product_keyword.title()}** sedang kosong."
 
-        if session["budget"] is None:
-            session["state"] = "ask_budget"
-            return random.choice(ASK_BUDGET_RESPONSES)
+        total_stock = int(products["stok"].fillna(0).sum())
+        if total_stock <= 0:
+            return f"Maaf Kak 😢 Hoodie **{product_keyword.title()}** sedang habis."
 
-        if session["size"] is None:
-            session["state"] = "ask_size"
-            return random.choice(ASK_SIZE_RESPONSES)
+        # Simpan ke session agar bisa lanjut ke detail/checkout
+        session["state"] = "ready_shown"
+        session["last_products"] = products
 
-        # 🔥 LANGSUNG REKOMENDASI
+        # Ambil info untuk respon seragam
+        sizes = sorted(products["ukuran"].astype(str).unique())
+        price_min = int(products["harga"].min())
+
+        # RESPON YANG BENAR (Disamakan dengan Ready Handler)
+        return (
+            f"Iya Kak 😊 Hoodie **{product_keyword.title()}** masih ready.\n\n"
+            f"• Size tersedia: {', '.join(sizes)}\n"
+            f"• Stok total: {total_stock} pcs\n"
+            f"• Harga: Rp{price_min:,}\n\n"
+            "Ketik *detail* kalau mau info lengkap, atau bilang *checkout* ya Kak 😊"
+        )
+
+    # --- CEK APAKAH SEMUA KRITERIA SUDAH TERPENUHI (Untuk Opsi 1) ---
+    if session["gender"] and session["budget"] and session["size"]:
         products = filter_by_criteria(
             session["gender"], session["budget"], session["size"]
         )
-
         if products.empty:
+            # Jika tidak ada hasil, tanya ulang kriteria tertentu
+            session["budget"] = None
             session["state"] = "ask_budget"
-            return (
-                "Waduh Kak 😢\n"
-                "Tidak ada hoodie yang cocok dengan pilihan Kakak.\n"
-                "Mau coba budget atau ukuran lain?"
-            )
+            return "Waduh Kak 😢 Tidak ada yang cocok dengan kriteria itu. Mau coba budget atau ukuran lain?"
 
         session["state"] = "recommend"
         session["last_products"] = products
-
-        response = "Siap Kak 😍\nIni hoodie yang paling cocok buat Kakak:\n\n"
-
+        res = "Siap Kak 😍 Ini yang paling cocok:\n\n"
         for _, row in products.iterrows():
-            response += (
-                f"• {row['nama_produk']} — Rp{int(row['harga']):,}\n"
-                f"  Warna: {row['warna']} | Size: {row['ukuran']} | Stok: {row['stok']}\n"
-                f"  Link: {row['link_checkout']}\n\n"
-            )
+            res += f"• {row['nama_produk']} (Size {row['ukuran']}) - Rp{int(row['harga']):,}\n"
+        res += "\nMau checkout atau lihat detail yang mana Kak? 😊"
+        return res
 
-        response += "Mau langsung checkout salah satunya Kak? 😊"
-        return response
-
-    # ===== DETEKSI NIAT BELI =====
-    if session.get("last_products") is not None:
-
-        if any(k in message_lower for k in BUY_INTENT_KEYWORDS):
-            first = session["last_products"].iloc[0]
-            session["state"] = "post_checkout"
-            return (
-                "Siap Kak 😍\n"
-                "Ini link checkout-nya ya:\n"
-                f"{first['link_checkout']}\n\n"
-                "Kalau mau aku bantuin sampai beres juga bisa 😊"
-            )
-
-        if session["state"] == "post_checkout" and any(
-            k in message_lower for k in POST_CHECKOUT_KEYWORDS
-        ):
-            return (
-                "Siap Kak 😊\n"
-                "Tinggal klik link tadi ya.\n\n"
-                "Di halaman checkout nanti Kakak bisa pilih:\n"
-                "• Transfer bank\n"
-                "• E-wallet (OVO / DANA / GoPay)\n"
-                "• COD (kalau tersedia)\n\n"
-                "Kalau ada kendala di proses checkout,\n"
-                "tinggal bilang aja ya Kak, aku bantu cekin 😄"
-            )
-
-    # ===== STATE MACHINE =====
-    state = session["state"]
-
-    if state == "ask_gender":
-        gender = parse_gender(message_lower)
-
-        if gender:
-            session["gender"] = gender
-            session["state"] = "ask_budget"
-            return random.choice(ASK_BUDGET_RESPONSES)
-
+    # --- LOGIKA BERTATAHAP (Opsi 2) ---
+    if not session["gender"]:
+        session["state"] = "ask_gender"
         return random.choice(ASK_GENDER_RESPONSES)
 
-    if state == "ask_budget":
-        budget = parse_budget(message_lower)
-
-        if budget:
-            session["budget"] = budget
-            session["state"] = "ask_size"
-            return random.choice(ASK_SIZE_RESPONSES)
-
+    if not session["budget"]:
+        session["state"] = "ask_budget"
         return random.choice(ASK_BUDGET_RESPONSES)
 
-    if state == "ask_size":
-        size = parse_size(message)
-
-        if size:
-            session["size"] = size
-
-            products = filter_by_criteria(
-                session["gender"], session["budget"], session["size"]
-            )
-
-            if products.empty:
-                session["state"] = "ask_budget"
-                return (
-                    "Waduh Kak 😢\n"
-                    "Tidak ada hoodie yang cocok dengan pilihan Kakak.\n"
-                    "Mau coba budget atau ukuran lain?"
-                )
-
-            session["state"] = "recommend"
-            session["last_products"] = products
-
-            response = "Siap Kak 😍\nIni hoodie yang paling cocok buat Kakak:\n\n"
-
-            for _, row in products.iterrows():
-                response += (
-                    f"• {row['nama_produk']} — Rp{int(row['harga']):,}\n"
-                    f"  Warna: {row['warna']} | Size: {row['ukuran']} | Stok: {row['stok']}\n"
-                    f"  Link: {row['link_checkout']}\n\n"
-                )
-
-            response += "Mau langsung checkout salah satunya Kak? 😊"
-            return response
-
+    if not session["size"]:
+        session["state"] = "ask_size"
         return random.choice(ASK_SIZE_RESPONSES)
 
     return random.choice(FALLBACK_RESPONSES)
