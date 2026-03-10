@@ -1,0 +1,5 @@
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "gunicorn -w 1 -k uvicorn.workers.UvicornWorker app.main:app"
