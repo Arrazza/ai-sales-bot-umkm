@@ -2,6 +2,7 @@ import random
 import re
 from typing import Optional, List
 import os
+import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,7 +11,7 @@ WA_ADMIN_NUMBER = os.getenv("WA_ADMIN_NUMBER", "6282135965079")
 ADMIN_NEGO_MSG = os.getenv("ADMIN_NEGO_MESSAGE", "Halo Admin, mau nego harga ini")
 
 # fungsi filter_by_criteria digunakan di beberapa flow (import awal)
-from app.inventory import filter_by_criteria
+from app.inventory import filter_by_criteria, get_checkout_link
 
 # ===== MEMORY SESSION =====
 session_store = {}
@@ -158,6 +159,51 @@ FALLBACK_RESPONSES = [
     "Hehe 😄 Kayaknya aku salah paham.\nKita lanjut dikit ya Kak.",
 ]
 
+
+def get_ai_fallback(message: str, session: dict) -> str:
+    """
+    Memanggil Claude API untuk menjawab pesan yang tidak tertangkap
+    oleh flow utama. Tetap dalam konteks toko hoodie.
+    Jika API gagal / tidak ada key, fallback ke respons random.
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return random.choice(FALLBACK_RESPONSES)
+
+    # Bangun konteks session agar Claude tahu posisi percakapan
+    gender = session.get("gender") or "belum diketahui"
+    budget = session.get("budget")
+    budget_str = f"Rp{budget:,}" if budget else "belum diketahui"
+    size = session.get("size") or "belum diketahui"
+    state = session.get("state") or "ask_gender"
+
+    system_prompt = (
+        "Kamu adalah asisten penjualan toko hoodie online di Indonesia. "
+        "Kamu ramah, singkat, dan selalu menggunakan bahasa Indonesia santai. "
+        "Tugasmu membantu pelanggan menemukan dan membeli hoodie. "
+        "Jangan keluar dari konteks toko hoodie. "
+        "Jangan sebut bahwa kamu AI atau bot — cukup jawab natural. "
+        "Gunakan emoji secukupnya. Maksimal 3 kalimat per balasan.\n\n"
+        f"Konteks sesi saat ini:\n"
+        f"- Gender pilihan: {gender}\n"
+        f"- Budget: {budget_str}\n"
+        f"- Ukuran: {size}\n"
+        f"- Tahap percakapan: {state}"
+    )
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            system=system_prompt,
+            messages=[{"role": "user", "content": message}],
+        )
+        return response.content[0].text.strip()
+    except Exception:
+        return random.choice(FALLBACK_RESPONSES)
+
+
 DETAIL_KEYWORDS = [
     "detail",
     "detail lengkap",
@@ -213,16 +259,41 @@ def parse_gender(text: str) -> Optional[str]:
     return None
 
 
-def extract_product_keyword(text: str, aliases: List[str]) -> Optional[str]:
-    if not text:
-        return None
-    text = text.lower()
-    for alias in aliases:
-        alias = alias.strip().lower()
-        if not alias:
-            continue
-        if f" {alias} " in f" {text} ":
-            return alias
+def parse_color(text: str) -> Optional[str]:
+    """
+    Ekstrak keyword warna dari pesan user.
+    Return lowercase string atau None.
+    """
+    COLOR_KEYWORDS = [
+        "hitam",
+        "black",
+        "putih",
+        "white",
+        "navy",
+        "biru",
+        "blue",
+        "abu",
+        "grey",
+        "gray",
+        "merah",
+        "red",
+        "hijau",
+        "green",
+        "coklat",
+        "brown",
+        "cream",
+        "krem",
+        "kuning",
+        "yellow",
+        "ungu",
+        "purple",
+        "maroon",
+        "olive",
+    ]
+    text_lower = text.lower()
+    for color in COLOR_KEYWORDS:
+        if color in text_lower:
+            return color
     return None
 
 
@@ -238,6 +309,7 @@ def handle_chat(message: str, session_id: Optional[str]):
             "gender": None,
             "budget": None,
             "size": None,
+            "color": None,
             "last_products": None,
         }
 
@@ -254,6 +326,7 @@ def handle_chat(message: str, session_id: Optional[str]):
             "gender": None,
             "budget": None,
             "size": None,
+            "color": None,
         }
         return random.choice(ASK_GENDER_RESPONSES)
 
@@ -317,16 +390,32 @@ def handle_chat(message: str, session_id: Optional[str]):
         if products is not None and not products.empty:
             p = products.iloc[0]
             session["state"] = "post_checkout"
+
+            # Cari produk spesifik yang disebut user, kalau tidak ada ambil yang pertama
+            selected = None
+            for _, row in products.iterrows():
+                if row["nama_produk"].lower() in message_lower:
+                    selected = row
+                    break
+            if selected is None:
+                selected = p
+
+            link = get_checkout_link(products, selected["nama_produk"])
+            link_text = (
+                link if link else "_(link belum tersedia, hubungi admin ya Kak)_"
+            )
+
             return (
-                "Siap Kak 😍\nIni link checkout-nya ya:\n"
-                f"{p.get('link_checkout','-')}\n\n"
-                # "Kalau mau aku bantuin sampai beres juga bisa 😊"
+                f"Siap Kak 😍 Ini link checkout untuk **{selected['nama_produk']}**:\n\n"
+                f"{link_text}\n\n"
+                "Kalau ada kendala, bilang aja ya Kak 🙏"
             )
 
     # Logika ekstraksi informasi
     gender_guess = parse_gender(message_lower)
     budget_guess = parse_budget(message_lower)
     size_guess = parse_size(message)
+    color_guess = parse_color(message_lower)
 
     if gender_guess:
         session["gender"] = gender_guess
@@ -334,6 +423,8 @@ def handle_chat(message: str, session_id: Optional[str]):
         session["budget"] = budget_guess
     if size_guess:
         session["size"] = size_guess
+    if color_guess:
+        session["color"] = color_guess
 
     # --- LOGIKA TRANSISI: MENANGKAP PILIHAN PRODUK SETELAH REKOMENDASI ---
     df_inv = fetch_inventory()
@@ -369,7 +460,10 @@ def handle_chat(message: str, session_id: Optional[str]):
     # --- CEK APAKAH SEMUA KRITERIA SUDAH TERPENUHI (Untuk Opsi 1) ---
     if session["gender"] and session["budget"] and session["size"]:
         products = filter_by_criteria(
-            session["gender"], session["budget"], session["size"]
+            session["gender"],
+            session["budget"],
+            session["size"],
+            color=session.get("color"),
         )
         if products.empty:
             # Jika tidak ada hasil, tanya ulang kriteria tertentu
@@ -398,4 +492,5 @@ def handle_chat(message: str, session_id: Optional[str]):
         session["state"] = "ask_size"
         return random.choice(ASK_SIZE_RESPONSES)
 
-    return random.choice(FALLBACK_RESPONSES)
+    # Semua kondisi tidak match → gunakan AI fallback
+    return get_ai_fallback(message, session)

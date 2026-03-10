@@ -85,6 +85,10 @@ def fetch_inventory():
     if "ukuran" in df.columns:
         df["ukuran"] = df["ukuran"].astype(str).str.strip()
 
+    # ===== WARNA: lowercase dan bersihkan spasi =====
+    if "warna" in df.columns:
+        df["warna"] = df["warna"].fillna("").astype(str).str.lower().str.strip()
+
     # ===== BERSIHKAN ROW MINIMAL =====
     # hanya drop rows jika kolom tersebut memang ada
     required_cols = [c for c in ["harga", "nama_produk"] if c in df.columns]
@@ -159,7 +163,7 @@ def get_products_by_alias(df, alias_keyword: str):
     return df[mask]
 
 
-def filter_by_criteria(gender=None, budget=None, size=None):
+def filter_by_criteria(gender=None, budget=None, size=None, color=None):
     """
     Filter inventory berdasarkan kriteria.
     TIDAK memfilter stok > 0 (biar logic.py yang tentukan ready / habis)
@@ -188,4 +192,32 @@ def filter_by_criteria(gender=None, budget=None, size=None):
     if gender and "gender" in df.columns:
         df = df[df["gender"].astype(str).str.lower() == gender.lower()]
 
+    # ===== FILTER WARNA =====
+    # pakai substring match karena warna di sheet bisa panjang
+    # contoh: "Dark Navy Semi Black" tetap match kalau user ketik "navy" atau "black"
+    if color and "warna" in df.columns:
+        keyword = color.lower().strip()
+        df = df[df["warna"].str.contains(keyword, na=False)]
+
     return df
+
+
+def get_checkout_link(df, nama_produk: str) -> str:
+    """
+    Ambil link checkout untuk produk tertentu.
+    Return: string URL atau string kosong kalau tidak ada.
+    """
+    if df is None or df.empty:
+        return ""
+
+    if "link_checkout" not in df.columns or "nama_produk" not in df.columns:
+        return ""
+
+    keyword = nama_produk.lower().strip()
+    match = df[df["nama_produk"].astype(str).str.lower().str.strip() == keyword]
+
+    if match.empty:
+        return ""
+
+    link = match.iloc[0]["link_checkout"]
+    return str(link).strip() if link and str(link).strip() not in {"", "nan"} else ""
