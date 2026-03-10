@@ -3,6 +3,7 @@ from app.schemas import ChatRequest, ChatResponse
 from app.chat_logic import handle_chat
 import httpx
 import os
+import json
 
 app = FastAPI(title="HoodieBot API")
 
@@ -22,36 +23,39 @@ def chat_endpoint(request: ChatRequest):
 
 @app.get("/webhook")
 def webhook_verify():
-    """GET handler untuk verifikasi Fonnte"""
     return {"status": "ok"}
 
 
 @app.post("/webhook")
 async def webhook_fonnte(request: Request):
-    """
-    Endpoint untuk menerima pesan masuk dari Fonnte.
-    Fonnte akan POST ke sini setiap ada pesan WA masuk.
-    """
-    try:
-        data = await request.json()
-    except Exception:
-        data = await request.form()
-        data = dict(data)
+    # Log raw payload untuk debug
+    body = await request.body()
+    print("WEBHOOK RAW BODY:", body.decode("utf-8"))
 
-    # Ambil data dari payload Fonnte
+    try:
+        data = json.loads(body)
+    except Exception:
+        from urllib.parse import parse_qs
+
+        parsed = parse_qs(body.decode("utf-8"))
+        data = {k: v[0] for k, v in parsed.items()}
+
+    print("WEBHOOK PARSED DATA:", data)
+
     sender = data.get("sender", "")
     message = data.get("message", "")
+
+    print(f"SENDER: {sender}, MESSAGE: {message}")
 
     if not sender or not message:
         return {"status": "ignored"}
 
-    # Gunakan sender sebagai session_id (unik per nomor WA)
     reply = handle_chat(message, sender)
+    print(f"REPLY: {reply}")
 
-    # Kirim balik reply ke WA sender via Fonnte API
     if FONNTE_TOKEN and reply:
         async with httpx.AsyncClient() as client:
-            await client.post(
+            res = await client.post(
                 "https://api.fonnte.com/send",
                 headers={"Authorization": FONNTE_TOKEN},
                 data={
@@ -59,5 +63,6 @@ async def webhook_fonnte(request: Request):
                     "message": reply,
                 },
             )
+            print(f"FONNTE SEND STATUS: {res.status_code}, BODY: {res.text}")
 
     return {"status": "ok"}
