@@ -20,6 +20,12 @@ def chat_endpoint(request: ChatRequest):
     return ChatResponse(reply=reply)
 
 
+@app.get("/webhook")
+def webhook_verify():
+    """GET handler untuk verifikasi Fonnte"""
+    return {"status": "ok"}
+
+
 @app.post("/webhook")
 async def webhook_fonnte(request: Request):
     """
@@ -51,7 +57,7 @@ async def webhook_fonnte(request: Request):
                 data={
                     "target": sender,
                     "message": reply,
-                }
+                },
             )
 
     return {"status": "ok"}
