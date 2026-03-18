@@ -2,222 +2,229 @@ import time
 import os
 import requests
 import pandas as pd
+from datetime import datetime
 from dotenv import load_dotenv
-
 
 load_dotenv()
 
 API_KEY = os.getenv("GOOGLE_SHEETS_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-SHEET_NAME = "Hoodie"  # ganti kalau nama sheet beda
+
+SHEET_STOK = "Stok"
+SHEET_ORDERS = "Orders"
+SHEET_PELANGGAN = "Pelanggan"
+
 CACHE_TTL = 60
+_stok_cache = {"data": None, "last_fetch": 0}
 
-_inventory_cache = {"data": None, "last_fetch": 0}
+HARGA_DEFAULT_LPG = int(os.getenv("HARGA_LPG", "18000"))
 
 
-def fetch_inventory():
-    # safety: pastikan API key & spreadsheet id ada
+# ===== FETCH STOK =====
+def fetch_stok():
     if not API_KEY or not SPREADSHEET_ID:
         raise RuntimeError(
             "GOOGLE_SHEETS_API_KEY atau SPREADSHEET_ID belum diset di .env"
         )
 
     now = time.time()
-    if (
-        _inventory_cache["data"] is not None
-        and now - _inventory_cache["last_fetch"] < CACHE_TTL
-    ):
-        return _inventory_cache["data"]
+    if _stok_cache["data"] is not None and now - _stok_cache["last_fetch"] < CACHE_TTL:
+        return _stok_cache["data"]
 
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/"
-        f"{SPREADSHEET_ID}/values/{SHEET_NAME}?key={API_KEY}"
+        f"{SPREADSHEET_ID}/values/{SHEET_STOK}?key={API_KEY}"
     )
 
     try:
         res = requests.get(url, timeout=10)
         res.raise_for_status()
     except Exception as e:
-        print("FETCH_INVENTORY: request error:", e)
-        # jangan raise ke caller (agar bot tetap hidup) — kembalikan empty df
+        print("FETCH_STOK ERROR:", e)
         return pd.DataFrame()
 
     values = res.json().get("values", [])
     if len(values) < 2:
         return pd.DataFrame()
 
-    # INI
-    raw_headers = values[0]
-    # Normalisasi header: lowercase, ganti spasi dengan underscore
-    headers = [
-        h.strip().lower().replace(" ", "_") if h and str(h).strip() else f"col_{i}"
-        for i, h in enumerate(raw_headers)
-    ]
-
+    headers = [h.strip().lower().replace(" ", "_") for h in values[0]]
     df = pd.DataFrame(values[1:], columns=headers)
 
-    # Hapus baris ini jika ada dua kali:
-    # df.columns = [c.strip().lower() for c in df.columns]
-    # Cukup pastikan baris di bawah ini yang aktif:
-    df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_")
-
-    # ===== KONVERSI & CLEAN HARGA =====
-    if "harga" in df.columns:
-        s = df["harga"].astype(str).fillna("")
-        # hapus currency words like 'rp', 'idr' (case-insensitive)
-        s = s.str.replace(r"(?i)rp|idr", "", regex=True).str.strip()
-        # ganti koma/dot ribuan -> kosong
-        s = s.str.replace(",", "", regex=False).str.replace(".", "", regex=False)
-        # ubah trailing 'k' atau 'K' (contoh: 250k -> 250000)
-        s = s.str.replace(r"(?i)\bk\b", "000", regex=True)
-        # terakhir numeric
-        df["harga"] = pd.to_numeric(s, errors="coerce")
-
-    # ===== KONVERSI STOK =====
-    if "stok" in df.columns:
-        df["stok"] = pd.to_numeric(df["stok"], errors="coerce").fillna(0).astype(int)
-
-    # ===== ALIAS: pastikan string dan lower (mudah match) =====
-    if "alias" in df.columns:
-        df["alias"] = df["alias"].fillna("").astype(str).str.lower().str.strip()
-
-    # ===== UKURAN: bersihkan spasi, dan simpan apa adanya (upper/lower tidak dipaksakan) =====
-    if "ukuran" in df.columns:
-        df["ukuran"] = df["ukuran"].astype(str).str.strip()
-
-    # ===== WARNA: lowercase dan bersihkan spasi =====
-    if "warna" in df.columns:
-        df["warna"] = df["warna"].fillna("").astype(str).str.lower().str.strip()
-
-    # ===== BERSIHKAN ROW MINIMAL =====
-    # hanya drop rows jika kolom tersebut memang ada
-    required_cols = [c for c in ["harga", "nama_produk"] if c in df.columns]
-    if required_cols:
-        df = df.dropna(subset=required_cols, how="any")
-
-    # simpan cache
-    _inventory_cache["data"] = df
-    _inventory_cache["last_fetch"] = now
-
-    # (opsional) debug kecil — hapus atau komentari saat sudah stable
-    # print("DEBUG INVENTORY COLUMNS:", df.columns.tolist(), "ROWS:", len(df))
-
-    return df
-
-
-def get_all_aliases(df):
-    """
-    Ambil semua alias produk dari inventory.
-    Return: list[str] (lowercase, bersih, unik)
-    """
-    if df is None or df.empty:
-        return []
-
-    if "alias" not in df.columns:
-        return []
-
-    aliases = set()
-
-    for cell in df["alias"].dropna():
-        # pastikan string
-        text = str(cell).lower()
-
-        # split multiple alias
-        for a in text.split(","):
-            alias = a.strip().replace("-", " ").replace("_", " ")
-
-            # normalisasi spasi ganda
-            alias = " ".join(alias.split())
-
-            if alias and alias not in {"-", "n/a", "na"}:
-                aliases.add(alias)
-
-    return sorted(list(aliases))
-
-
-def get_products_by_alias(df, alias_keyword: str):
-    if df is None or df.empty:
-        return df.iloc[0:0]
-
-    if "alias" not in df.columns:
-        return df.iloc[0:0]
-
-    if not alias_keyword:
-        return df.iloc[0:0]
-
-    # normalisasi keyword user
-    keyword = alias_keyword.lower().replace("-", " ").replace("_", " ")
-    keyword = " ".join(keyword.split())
-
-    def alias_match(cell):
-        if not cell or pd.isna(cell):
-            return False
-
-        text = str(cell).lower().replace("-", " ").replace("_", " ")
-        text = " ".join(text.split())
-
-        # exact word match (lebih aman dari substring liar)
-        return keyword in text
-
-    mask = df["alias"].apply(alias_match)
-    return df[mask]
-
-
-def filter_by_criteria(gender=None, budget=None, size=None, color=None):
-    """
-    Filter inventory berdasarkan kriteria.
-    TIDAK memfilter stok > 0 (biar logic.py yang tentukan ready / habis)
-    """
-    df = fetch_inventory()
-
-    if df is None or df.empty:
-        return df
-
-    df = df.copy()
-
-    # ===== NORMALISASI KOLOM =====
-    for col in ["harga", "stok"]:
+    for col in ["stok_awal", "terjual", "stok_sekarang", "batas_restock"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-    # ===== FILTER UKURAN =====
-    if size and "ukuran" in df.columns:
-        df = df[df["ukuran"].astype(str).str.upper() == size.upper()]
-
-    # ===== FILTER BUDGET =====
-    if budget is not None and "harga" in df.columns:
-        df = df[df["harga"].notna() & (df["harga"] <= budget)]
-
-    # ===== FILTER GENDER =====
-    if gender and "gender" in df.columns:
-        df = df[df["gender"].astype(str).str.lower() == gender.lower()]
-
-    # ===== FILTER WARNA =====
-    # pakai substring match karena warna di sheet bisa panjang
-    # contoh: "Dark Navy Semi Black" tetap match kalau user ketik "navy" atau "black"
-    if color and "warna" in df.columns:
-        keyword = color.lower().strip()
-        df = df[df["warna"].str.contains(keyword, na=False)]
-
+    _stok_cache["data"] = df
+    _stok_cache["last_fetch"] = now
     return df
 
 
-def get_checkout_link(df, nama_produk: str) -> str:
-    """
-    Ambil link checkout untuk produk tertentu.
-    Return: string URL atau string kosong kalau tidak ada.
-    """
-    if df is None or df.empty:
-        return ""
+def get_stok_lpg() -> dict:
+    """Return info stok LPG: stok, harga, tersedia, hampir_habis."""
+    df = fetch_stok()
+    if df.empty:
+        return {
+            "stok": 0,
+            "harga": HARGA_DEFAULT_LPG,
+            "tersedia": False,
+            "hampir_habis": False,
+        }
 
-    if "link_checkout" not in df.columns or "nama_produk" not in df.columns:
-        return ""
+    mask = df["produk"].astype(str).str.lower().str.contains("lpg", na=False)
+    row = df[mask]
 
-    keyword = nama_produk.lower().strip()
-    match = df[df["nama_produk"].astype(str).str.lower().str.strip() == keyword]
+    if row.empty:
+        return {
+            "stok": 0,
+            "harga": HARGA_DEFAULT_LPG,
+            "tersedia": False,
+            "hampir_habis": False,
+        }
 
-    if match.empty:
-        return ""
+    r = row.iloc[0]
+    stok = int(r.get("stok_sekarang", r.get("stok_awal", 0)))
+    batas = int(r.get("batas_restock", 10))
 
-    link = match.iloc[0]["link_checkout"]
-    return str(link).strip() if link and str(link).strip() not in {"", "nan"} else ""
+    return {
+        "stok": stok,
+        "harga": HARGA_DEFAULT_LPG,
+        "tersedia": stok > 0,
+        "hampir_habis": stok <= batas,
+    }
+
+
+def invalidate_stok_cache():
+    _stok_cache["data"] = None
+    _stok_cache["last_fetch"] = 0
+
+
+# ===== GENERATE ORDER ID =====
+def generate_order_id() -> str:
+    try:
+        url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{SPREADSHEET_ID}/values/{SHEET_ORDERS}?key={API_KEY}"
+        )
+        res = requests.get(url, timeout=10)
+        values = res.json().get("values", [])
+        today = datetime.now().strftime("%Y%m%d")
+        prefix = f"ORD-{today}-"
+        count = sum(1 for row in values[1:] if row and str(row[0]).startswith(prefix))
+        return f"{prefix}{str(count + 1).zfill(3)}"
+    except Exception:
+        return f"ORD-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+
+# ===== CATAT ORDER =====
+def catat_order(
+    nama: str,
+    no_wa: str,
+    jumlah: int,
+    metode_ambil: str = "Ambil Sendiri",
+    catatan: str = "Tidak ada catatan",
+    sumber: str = "WA Bot",
+) -> dict:
+    if not API_KEY or not SPREADSHEET_ID:
+        return {"success": False, "order_id": "-", "total": 0}
+
+    harga = HARGA_DEFAULT_LPG
+    total = harga * jumlah
+    order_id = generate_order_id()
+    now = datetime.now()
+
+    row = [
+        order_id,
+        now.strftime("%Y-%m-%d"),
+        now.strftime("%H:%M"),
+        nama,
+        no_wa,
+        "LPG 3kg",
+        jumlah,
+        harga,
+        total,
+        metode_ambil,
+        "Belum",  # Status_Bayar — ibu update manual
+        catatan,
+        sumber,
+    ]
+
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/"
+        f"{SPREADSHEET_ID}/values/{SHEET_ORDERS}:append"
+        f"?valueInputOption=USER_ENTERED&key={API_KEY}"
+    )
+
+    try:
+        res = requests.post(url, json={"values": [row]}, timeout=10)
+        res.raise_for_status()
+        print(f"ORDER DICATAT: {order_id} | {nama} | {jumlah} tabung | Rp{total:,}")
+        _update_pelanggan(nama, no_wa, total)
+        invalidate_stok_cache()
+        return {"success": True, "order_id": order_id, "total": total}
+    except Exception as e:
+        print("CATAT_ORDER ERROR:", e)
+        return {"success": False, "order_id": order_id, "total": total}
+
+
+# ===== UPDATE PELANGGAN =====
+def _update_pelanggan(nama: str, no_wa: str, total_belanja: int):
+    if not API_KEY or not SPREADSHEET_ID:
+        return
+
+    try:
+        url_get = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{SPREADSHEET_ID}/values/{SHEET_PELANGGAN}?key={API_KEY}"
+        )
+        res = requests.get(url_get, timeout=10)
+        values = res.json().get("values", [])
+        today = datetime.now().strftime("%Y-%m-%d")
+        no_wa_clean = str(no_wa).strip()
+
+        existing_row = None
+        existing_idx = None
+        for i, row in enumerate(values[1:], start=2):
+            if row and str(row[0]).strip() == no_wa_clean:
+                existing_row = row
+                existing_idx = i
+                break
+
+        if existing_row:
+            total_order_lama = (
+                int(existing_row[2]) if len(existing_row) > 2 and existing_row[2] else 0
+            )
+            total_belanja_lama = (
+                int(existing_row[3]) if len(existing_row) > 3 and existing_row[3] else 0
+            )
+            total_order_baru = total_order_lama + 1
+            total_belanja_baru = total_belanja_lama + total_belanja
+            label = "Pelanggan Tetap" if total_order_baru >= 3 else "Pelanggan Baru"
+
+            url_update = (
+                f"https://sheets.googleapis.com/v4/spreadsheets/"
+                f"{SPREADSHEET_ID}/values/{SHEET_PELANGGAN}"
+                f"!C{existing_idx}:F{existing_idx}"
+                f"?valueInputOption=USER_ENTERED&key={API_KEY}"
+            )
+            requests.put(
+                url_update,
+                json={"values": [[total_order_baru, total_belanja_baru, today, label]]},
+                timeout=10,
+            )
+        else:
+            url_append = (
+                f"https://sheets.googleapis.com/v4/spreadsheets/"
+                f"{SPREADSHEET_ID}/values/{SHEET_PELANGGAN}:append"
+                f"?valueInputOption=USER_ENTERED&key={API_KEY}"
+            )
+            requests.post(
+                url_append,
+                json={
+                    "values": [
+                        [no_wa_clean, nama, 1, total_belanja, today, "Pelanggan Baru"]
+                    ]
+                },
+                timeout=10,
+            )
+    except Exception as e:
+        print("UPDATE_PELANGGAN ERROR:", e)

@@ -1,26 +1,33 @@
+import os
+import json
+import httpx
 from fastapi import FastAPI, Request
 from app.schemas import ChatRequest, ChatResponse
 from app.chat_logic import handle_chat
-import httpx
-import os
-import json
+from dotenv import load_dotenv
 
-app = FastAPI(title="HoodieBot API")
+load_dotenv()
 
 FONNTE_TOKEN = os.getenv("FONNTE_TOKEN", "")
+NAMA_TOKO = "Wijaya Store"
+
+app = FastAPI(title=f"{NAMA_TOKO} Bot API")
 
 
+# ===== HEALTH CHECK =====
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "HoodieBot API is running"}
+    return {"status": "ok", "message": f"{NAMA_TOKO} Bot is running 🏪"}
 
 
+# ===== CHAT ENDPOINT (untuk testing via Swagger) =====
 @app.post("/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
     reply = handle_chat(request.message, request.session_id)
     return ChatResponse(reply=reply)
 
 
+# ===== WEBHOOK FONNTE =====
 @app.get("/webhook")
 def webhook_verify():
     return {"status": "ok"}
@@ -28,41 +35,50 @@ def webhook_verify():
 
 @app.post("/webhook")
 async def webhook_fonnte(request: Request):
-    # Log raw payload untuk debug
-    body = await request.body()
-    print("WEBHOOK RAW BODY:", body.decode("utf-8"))
-
     try:
-        data = json.loads(body)
-    except Exception:
-        from urllib.parse import parse_qs
+        body = await request.body()
+        print("WEBHOOK RAW BODY:", body[:500])
 
-        parsed = parse_qs(body.decode("utf-8"))
-        data = {k: v[0] for k, v in parsed.items()}
+        try:
+            data = json.loads(body)
+        except Exception:
+            form = await request.form()
+            data = dict(form)
 
-    print("WEBHOOK PARSED DATA:", data)
+        print("WEBHOOK DATA:", data)
 
-    sender = data.get("sender", "")
-    message = data.get("message", "")
+        # Ambil sender dan message dari payload Fonnte
+        sender = str(data.get("sender", "")).strip()
+        message = str(data.get("message", "")).strip()
 
-    print(f"SENDER: {sender}, MESSAGE: {message}")
+        print(f"SENDER: {sender} | MESSAGE: {message}")
 
-    if not sender or not message:
-        return {"status": "ignored"}
+        if not sender or not message:
+            return {"status": "ignored", "reason": "no sender or message"}
 
-    reply = handle_chat(message, sender)
-    print(f"REPLY: {reply}")
+        # Abaikan pesan dari diri sendiri (bot)
+        device = str(data.get("device", "")).strip()
+        if sender == device:
+            return {"status": "ignored", "reason": "self message"}
 
-    if FONNTE_TOKEN and reply:
+        # Proses pesan — gunakan nomor WA sebagai session_id
+        reply = handle_chat(message, session_id=sender, no_wa=sender)
+
+        if not reply:
+            return {"status": "ignored", "reason": "no reply generated"}
+
+        # Kirim balasan via Fonnte
         async with httpx.AsyncClient() as client:
-            res = await client.post(
+            fonnte_res = await client.post(
                 "https://api.fonnte.com/send",
                 headers={"Authorization": FONNTE_TOKEN},
-                data={
-                    "target": sender,
-                    "message": reply,
-                },
+                data={"target": sender, "message": reply},
+                timeout=10,
             )
-            print(f"FONNTE SEND STATUS: {res.status_code}, BODY: {res.text}")
+            print("FONNTE SEND STATUS:", fonnte_res.status_code, fonnte_res.text[:200])
 
-    return {"status": "ok"}
+        return {"status": "ok", "reply_sent": True}
+
+    except Exception as e:
+        print("WEBHOOK ERROR:", e)
+        return {"status": "error", "detail": str(e)}
