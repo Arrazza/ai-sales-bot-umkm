@@ -154,7 +154,7 @@ def get_ai_fallback(message: str, session: dict) -> str:
     nama = session.get("nama", "Pelanggan")
 
     system_prompt = (
-        f"Kamu adalah asisten AI dengan nama Arza {NAMA_TOKO}, toko penjual LPG 3kg di Klaten, Jawa Tengah. "
+        f"Kamu adalah asisten AI {NAMA_TOKO}, toko penjual LPG 3kg di Klaten, Jawa Tengah. "
         "Kamu ramah, singkat, dan menggunakan bahasa Indonesia santai. "
         "Tugasmu membantu pelanggan cek stok dan pesan LPG 3kg. "
         "Harga LPG 3kg sekitar Rp18.000 per tabung. "
@@ -223,7 +223,7 @@ def handle_chat(message: str, session_id: Optional[str], no_wa: Optional[str] = 
             session["state"] = "main_menu"
             return (
                 f"Halo! Selamat datang di *{NAMA_TOKO}* 🏪\n\n"
-                "Saya Arza (AI) yang siap membantu kamu 24 jam 😊\n\n"
+                "Saya asisten AI yang siap membantu kamu 24 jam 😊\n\n"
                 "Mau ngapain nih?\n"
                 "• Ketik *stok* — cek ketersediaan LPG\n"
                 "• Ketik *pesan* — order LPG 3kg\n"
@@ -351,7 +351,7 @@ def handle_chat(message: str, session_id: Optional[str], no_wa: Optional[str] = 
         session["state"] = "konfirmasi_order"
         return handle_chat("konfirmasi", session_id, no_wa)
 
-    # ===== STATE: KONFIRMASI ORDER =====
+    # ===== STATE: KONFIRMASI ORDER (tampilkan ringkasan) =====
     if state == "konfirmasi_order":
         info = get_stok_lpg()
         nama = session.get("nama", "-")
@@ -366,6 +366,9 @@ def handle_chat(message: str, session_id: Optional[str], no_wa: Optional[str] = 
             else ""
         )
 
+        # Pindah state ke waiting_konfirmasi supaya pesan berikutnya diproses
+        session["state"] = "waiting_konfirmasi"
+
         return (
             f"📋 *Ringkasan Order*\n\n"
             f"• Nama: {nama}\n"
@@ -379,14 +382,14 @@ def handle_chat(message: str, session_id: Optional[str], no_wa: Optional[str] = 
         )
 
     # ===== STATE: WAITING KONFIRMASI =====
-    if state == "konfirmasi_order":
+    if state == "waiting_konfirmasi":
         if any(k in msg_lower for k in BATAL_KEYWORDS):
             reset_session(session_id)
             return "Order dibatalkan ya 🙏 Ketik *pesan* kalau mau order lagi 😊"
 
-    # Handle konfirmasi dari state apapun yang menunggu jawaban iya/tidak
+    # Handle konfirmasi
     if any(k in msg_lower for k in KONFIRMASI_KEYWORDS) and session.get("jumlah"):
-        if session.get("state") in ["konfirmasi_order", "waiting_konfirmasi"]:
+        if session.get("state") in ["waiting_konfirmasi"]:
             # Proses order
             nama = session.get("nama", "Pelanggan")
             no_wa_pelanggan = session.get("no_wa") or session_id
