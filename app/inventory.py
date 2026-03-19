@@ -13,6 +13,20 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CLIENT_EMAIL = os.getenv("GOOGLE_CLIENT_EMAIL")
 GOOGLE_PRIVATE_KEY = os.getenv("GOOGLE_PRIVATE_KEY", "").replace("\\n", "\n")
 
+# ===== DEBUG ENV (hapus setelah fix) =====
+print("=== DEBUG ENV CHECK ===")
+print("GOOGLE_CLIENT_EMAIL ada:", bool(GOOGLE_CLIENT_EMAIL))
+print(
+    "GOOGLE_CLIENT_EMAIL value:",
+    GOOGLE_CLIENT_EMAIL[:30] if GOOGLE_CLIENT_EMAIL else "KOSONG",
+)
+print("GOOGLE_PRIVATE_KEY ada:", bool(GOOGLE_PRIVATE_KEY))
+print(
+    "GOOGLE_PRIVATE_KEY awal:",
+    GOOGLE_PRIVATE_KEY[:40] if GOOGLE_PRIVATE_KEY else "KOSONG",
+)
+print("=======================")
+
 SHEET_STOK = "Stok"
 SHEET_ORDERS = "Orders"
 SHEET_PELANGGAN = "Pelanggan"
