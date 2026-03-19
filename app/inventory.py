@@ -1,5 +1,6 @@
 import time
 import os
+import json
 import requests
 import pandas as pd
 from datetime import datetime
@@ -9,6 +10,8 @@ load_dotenv()
 
 API_KEY = os.getenv("GOOGLE_SHEETS_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+GOOGLE_CLIENT_EMAIL = os.getenv("GOOGLE_CLIENT_EMAIL")
+GOOGLE_PRIVATE_KEY = os.getenv("GOOGLE_PRIVATE_KEY", "").replace("\\n", "\n")
 
 SHEET_STOK = "Stok"
 SHEET_ORDERS = "Orders"
@@ -16,11 +19,76 @@ SHEET_PELANGGAN = "Pelanggan"
 
 CACHE_TTL = 60
 _stok_cache = {"data": None, "last_fetch": 0}
+_token_cache = {"token": None, "expires_at": 0}
 
 HARGA_DEFAULT_LPG = int(os.getenv("HARGA_LPG", "18000"))
 
 
-# ===== FETCH STOK =====
+# ===== SERVICE ACCOUNT TOKEN =====
+def get_access_token() -> str:
+    """
+    Generate OAuth2 access token dari Service Account credentials.
+    Token di-cache selama 55 menit (expires tiap 60 menit).
+    """
+    now = time.time()
+    if _token_cache["token"] and now < _token_cache["expires_at"]:
+        return _token_cache["token"]
+
+    try:
+        import jwt  # PyJWT
+    except ImportError:
+        raise RuntimeError(
+            "PyJWT tidak terinstall. Tambahkan 'PyJWT>=2.0' ke requirements.txt"
+        )
+
+    if not GOOGLE_CLIENT_EMAIL or not GOOGLE_PRIVATE_KEY:
+        raise RuntimeError(
+            "GOOGLE_CLIENT_EMAIL atau GOOGLE_PRIVATE_KEY belum diset di env"
+        )
+
+    # Buat JWT claim
+    iat = int(now)
+    exp = iat + 3600
+
+    payload = {
+        "iss": GOOGLE_CLIENT_EMAIL,
+        "scope": "https://www.googleapis.com/auth/spreadsheets",
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": iat,
+        "exp": exp,
+    }
+
+    # Sign JWT dengan private key
+    signed_jwt = jwt.encode(payload, GOOGLE_PRIVATE_KEY, algorithm="RS256")
+
+    # Tukar JWT dengan access token
+    res = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": signed_jwt,
+        },
+        timeout=10,
+    )
+    res.raise_for_status()
+    token_data = res.json()
+    access_token = token_data["access_token"]
+
+    # Cache token
+    _token_cache["token"] = access_token
+    _token_cache["expires_at"] = now + 3300  # refresh 5 menit sebelum expire
+
+    print("SERVICE ACCOUNT TOKEN: berhasil di-generate")
+    return access_token
+
+
+def get_auth_headers() -> dict:
+    """Return header Authorization untuk write operation."""
+    token = get_access_token()
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+# ===== FETCH STOK (READ — pakai API key) =====
 def fetch_stok():
     if not API_KEY or not SPREADSHEET_ID:
         raise RuntimeError(
@@ -60,7 +128,6 @@ def fetch_stok():
 
 
 def get_stok_lpg() -> dict:
-    """Return info stok LPG: stok, harga, tersedia, hampir_habis."""
     df = fetch_stok()
     if df.empty:
         return {
@@ -98,7 +165,7 @@ def invalidate_stok_cache():
     _stok_cache["last_fetch"] = 0
 
 
-# ===== GENERATE ORDER ID =====
+# ===== GENERATE ORDER ID (READ — pakai API key) =====
 def generate_order_id() -> str:
     try:
         url = (
@@ -115,7 +182,7 @@ def generate_order_id() -> str:
         return f"ORD-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
 
-# ===== CATAT ORDER =====
+# ===== CATAT ORDER (WRITE — pakai Service Account) =====
 def catat_order(
     nama: str,
     no_wa: str,
@@ -124,7 +191,7 @@ def catat_order(
     catatan: str = "Tidak ada catatan",
     sumber: str = "WA Bot",
 ) -> dict:
-    if not API_KEY or not SPREADSHEET_ID:
+    if not SPREADSHEET_ID:
         return {"success": False, "order_id": "-", "total": 0}
 
     harga = HARGA_DEFAULT_LPG
@@ -143,7 +210,7 @@ def catat_order(
         harga,
         total,
         metode_ambil,
-        "Belum",  # Status_Bayar — ibu update manual
+        "Belum",
         catatan,
         sumber,
     ]
@@ -151,11 +218,17 @@ def catat_order(
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/"
         f"{SPREADSHEET_ID}/values/{SHEET_ORDERS}:append"
-        f"?valueInputOption=USER_ENTERED&key={API_KEY}"
+        f"?valueInputOption=USER_ENTERED"
     )
 
     try:
-        res = requests.post(url, json={"values": [row]}, timeout=10)
+        headers = get_auth_headers()
+        res = requests.post(
+            url,
+            headers=headers,
+            json={"values": [row]},
+            timeout=10,
+        )
         res.raise_for_status()
         print(f"ORDER DICATAT: {order_id} | {nama} | {jumlah} tabung | Rp{total:,}")
         _update_pelanggan(nama, no_wa, total)
@@ -166,20 +239,23 @@ def catat_order(
         return {"success": False, "order_id": order_id, "total": total}
 
 
-# ===== UPDATE PELANGGAN =====
+# ===== UPDATE PELANGGAN (WRITE — pakai Service Account) =====
 def _update_pelanggan(nama: str, no_wa: str, total_belanja: int):
-    if not API_KEY or not SPREADSHEET_ID:
+    if not SPREADSHEET_ID:
         return
 
     try:
+        headers = get_auth_headers()
+        today = datetime.now().strftime("%Y-%m-%d")
+        no_wa_clean = str(no_wa).strip()
+
+        # READ dulu pakai API key
         url_get = (
             f"https://sheets.googleapis.com/v4/spreadsheets/"
             f"{SPREADSHEET_ID}/values/{SHEET_PELANGGAN}?key={API_KEY}"
         )
         res = requests.get(url_get, timeout=10)
         values = res.json().get("values", [])
-        today = datetime.now().strftime("%Y-%m-%d")
-        no_wa_clean = str(no_wa).strip()
 
         existing_row = None
         existing_idx = None
@@ -204,10 +280,11 @@ def _update_pelanggan(nama: str, no_wa: str, total_belanja: int):
                 f"https://sheets.googleapis.com/v4/spreadsheets/"
                 f"{SPREADSHEET_ID}/values/{SHEET_PELANGGAN}"
                 f"!C{existing_idx}:F{existing_idx}"
-                f"?valueInputOption=USER_ENTERED&key={API_KEY}"
+                f"?valueInputOption=USER_ENTERED"
             )
             requests.put(
                 url_update,
+                headers=headers,
                 json={"values": [[total_order_baru, total_belanja_baru, today, label]]},
                 timeout=10,
             )
@@ -215,10 +292,11 @@ def _update_pelanggan(nama: str, no_wa: str, total_belanja: int):
             url_append = (
                 f"https://sheets.googleapis.com/v4/spreadsheets/"
                 f"{SPREADSHEET_ID}/values/{SHEET_PELANGGAN}:append"
-                f"?valueInputOption=USER_ENTERED&key={API_KEY}"
+                f"?valueInputOption=USER_ENTERED"
             )
             requests.post(
                 url_append,
+                headers=headers,
                 json={
                     "values": [
                         [no_wa_clean, nama, 1, total_belanja, today, "Pelanggan Baru"]
@@ -226,5 +304,6 @@ def _update_pelanggan(nama: str, no_wa: str, total_belanja: int):
                 },
                 timeout=10,
             )
+        print(f"PELANGGAN UPDATED: {nama} | {no_wa_clean}")
     except Exception as e:
         print("UPDATE_PELANGGAN ERROR:", e)

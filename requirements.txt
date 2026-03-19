@@ -27,3 +27,8 @@ urllib3==2.6.3
 uvicorn==0.39.0
 gunicorn
 httpx
+fastapi
+requests
+pandas
+PyJWT>=2.0
+cryptography
