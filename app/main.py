@@ -20,6 +20,20 @@ def health_check():
     return {"status": "ok", "message": f"{NAMA_TOKO} Bot is running 🏪"}
 
 
+# ===== DEBUG ENV (hapus setelah fix) =====
+@app.get("/debug-env")
+def debug_env():
+    client_email = os.getenv("GOOGLE_CLIENT_EMAIL", "")
+    private_key = os.getenv("GOOGLE_PRIVATE_KEY", "")
+    return {
+        "GOOGLE_CLIENT_EMAIL_ada": bool(client_email),
+        "GOOGLE_CLIENT_EMAIL_value": client_email[:40] if client_email else "KOSONG",
+        "GOOGLE_PRIVATE_KEY_ada": bool(private_key),
+        "GOOGLE_PRIVATE_KEY_awal": private_key[:50] if private_key else "KOSONG",
+        "SPREADSHEET_ID_ada": bool(os.getenv("SPREADSHEET_ID")),
+    }
+
+
 # ===== CHAT ENDPOINT (untuk testing via Swagger) =====
 @app.post("/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
