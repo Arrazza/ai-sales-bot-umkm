@@ -1,6 +1,5 @@
 import time
 import os
-import json
 import requests
 import pandas as pd
 from datetime import datetime
@@ -10,22 +9,6 @@ load_dotenv(override=False)
 
 API_KEY = os.getenv("GOOGLE_SHEETS_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CLIENT_EMAIL = os.getenv("GOOGLE_CLIENT_EMAIL")
-GOOGLE_PRIVATE_KEY = os.getenv("GOOGLE_PRIVATE_KEY", "").replace("\\n", "\n")
-
-# ===== DEBUG ENV (hapus setelah fix) =====
-print("=== DEBUG ENV CHECK ===")
-print("GOOGLE_CLIENT_EMAIL ada:", bool(GOOGLE_CLIENT_EMAIL))
-print(
-    "GOOGLE_CLIENT_EMAIL value:",
-    GOOGLE_CLIENT_EMAIL[:30] if GOOGLE_CLIENT_EMAIL else "KOSONG",
-)
-print("GOOGLE_PRIVATE_KEY ada:", bool(GOOGLE_PRIVATE_KEY))
-print(
-    "GOOGLE_PRIVATE_KEY awal:",
-    GOOGLE_PRIVATE_KEY[:40] if GOOGLE_PRIVATE_KEY else "KOSONG",
-)
-print("=======================")
 
 SHEET_STOK = "Stok"
 SHEET_ORDERS = "Orders"
@@ -36,6 +19,13 @@ _stok_cache = {"data": None, "last_fetch": 0}
 _token_cache = {"token": None, "expires_at": 0}
 
 HARGA_DEFAULT_LPG = int(os.getenv("HARGA_LPG", "18000"))
+
+
+# ===== CREDENTIALS (dibaca saat dibutuhkan, bukan saat import) =====
+def get_credentials():
+    email = os.getenv("GOOGLE_CLIENT_EMAIL", "")
+    key = os.getenv("GOOGLE_PRIVATE_KEY", "").replace("\\n", "\n")
+    return email, key
 
 
 # ===== SERVICE ACCOUNT TOKEN =====
@@ -54,6 +44,16 @@ def get_access_token() -> str:
         raise RuntimeError(
             "PyJWT tidak terinstall. Tambahkan 'PyJWT>=2.0' ke requirements.txt"
         )
+
+    GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY = get_credentials()
+
+    print("DEBUG get_access_token:")
+    print("  CLIENT_EMAIL ada:", bool(GOOGLE_CLIENT_EMAIL))
+    print("  PRIVATE_KEY ada:", bool(GOOGLE_PRIVATE_KEY))
+    print(
+        "  PRIVATE_KEY awal:",
+        GOOGLE_PRIVATE_KEY[:40] if GOOGLE_PRIVATE_KEY else "KOSONG",
+    )
 
     if not GOOGLE_CLIENT_EMAIL or not GOOGLE_PRIVATE_KEY:
         raise RuntimeError(
