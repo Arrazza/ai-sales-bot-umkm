@@ -6,7 +6,7 @@ from app.schemas import ChatRequest, ChatResponse
 from app.chat_logic import handle_chat
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)
 
 FONNTE_TOKEN = os.getenv("FONNTE_TOKEN", "")
 NAMA_TOKO = "Wijaya Store"

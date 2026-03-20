@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=False)
 
 API_KEY = os.getenv("GOOGLE_SHEETS_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
